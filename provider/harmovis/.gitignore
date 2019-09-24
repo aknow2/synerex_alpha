@@ -1,0 +1,4 @@
+harmovis-provider
+node_modules
+rainfall-data/*.json
+.DS_STORE

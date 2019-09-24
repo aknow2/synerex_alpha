@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"time"
+	"io/ioutil"
 	"github.com/mtfelian/golang-socketio"
 	"github.com/mtfelian/golang-socketio/transport"
 	"github.com/synerex/synerex_alpha/api"
@@ -13,7 +14,7 @@ import (
 	"log"
 	"net/http"
 	"os"
-//	"encoding/json"
+	"encoding/json"
 	"path/filepath"
 	"runtime"
 	"sync"
@@ -112,7 +113,7 @@ func assetsFileHandler(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(w, r, file, fi.ModTime(), f)
 }
 
-func run_server() *gosocketio.Server {
+func runServer() *gosocketio.Server {
 
 	currentRoot, err := os.Getwd()
 	if err != nil {
@@ -138,6 +139,7 @@ func run_server() *gosocketio.Server {
 	return server
 }
 
+// MapMarker struct
 type MapMarker struct {
 	mtype int32   `json:"mtype"`
 	id    int32   `json:"id"`
@@ -147,10 +149,15 @@ type MapMarker struct {
 	speed int32   `json:"speed"`
 }
 
-func (m *MapMarker) GetJson() string {
-	s := fmt.Sprintf("{\"mtype\":%d,\"id\":%d,\"lat\":%f,\"lon\":%f,\"angle\":%f,\"speed\":%d}",
-		m.mtype, m.id, m.lat, m.lon, m.angle, m.speed)
-	return s
+// GetJSON get json from MapMarker
+func (m *MapMarker) GetJSON() string {
+	// s := fmt.Sprintf("{\"mtype\":%d,\"id\":%d,\"lat\":%f,\"lon\":%f,\"angle\":%f,\"speed\":%d}",
+	//	m.mtype, m.id, m.lat, m.lon, m.angle, m.speed)
+	byteJSON, err := json.Marshal(m)
+	if (err != nil) {
+		log.Printf("fail to parse MapMarker %s", err.Error())
+	}
+	return string(byteJSON)
 }
 
 func supplyRideCallback(clt *sxutil.SMServiceClient, sp *api.Supply) {
@@ -164,10 +171,10 @@ func supplyRideCallback(clt *sxutil.SMServiceClient, sp *api.Supply) {
 			angle: flt.Angle,
 			speed: flt.Speed,
 		}
-//		jsondata, err := json.Marshal(*mm)
-		fmt.Println("rcb",mm.GetJson())
+		//jsondata, err := json.Marshal(*mm)
+		fmt.Println("rcb",mm.GetJSON())
 		mu.Lock()
-		ioserv.BroadcastToAll("event", mm.GetJson())
+		ioserv.BroadcastToAll("event", mm.GetJSON())
 		mu.Unlock()
 	}
 }
@@ -190,7 +197,7 @@ func supplyPTCallback(clt *sxutil.SMServiceClient, sp *api.Supply) {
 			speed: pt.Speed,
 		}
 		mu.Lock()
-		ioserv.BroadcastToAll("event", mm.GetJson())
+		ioserv.BroadcastToAll("event", mm.GetJSON())
 		mu.Unlock()
 	}
 }
@@ -208,6 +215,54 @@ func monitorStatus(){
 	}
 }
 
+type RainfallData struct {
+	Elevation float64 `json:"elevation"`
+	Position []float64 `json:"position"`
+	Color []int `json:"color"`
+}
+
+func scanRainfallDataFrom(dir string) []string {
+	files, err := ioutil.ReadDir(dir)
+	if err != nil {
+			panic(err)
+	}
+	var paths []string
+	for _, file := range files {
+			paths = append(paths, filepath.Join(dir, file.Name()))
+	}
+	return paths
+}
+
+func startProvidingRainFallData (ctx context.Context) {
+	fmt.Println("start providing rain fall data")
+	ticker := time.NewTicker(time.Second)
+	files := scanRainfallDataFrom("./rainfall-data")
+	maxFileIndex := len(files) - 1
+	fileIndex := 0
+	for {
+		select {
+		case <-ticker.C:
+			fileIndex++
+			if (fileIndex > maxFileIndex) {
+				fileIndex = 0
+			}
+			file := files[fileIndex]
+			log.Printf("load rainfall data from %s\n", file)
+			rainfallJSON, err := ioutil.ReadFile(file)
+			if err != nil {
+					panic(err)
+			}
+			provideRainData(string(rainfallJSON))
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+func provideRainData(rainfallJSON string) {
+	ioserv.BroadcastToAll("notify_new_rainfall_data", rainfallJSON)
+}
+
 func main() {
 	flag.Parse()
 	sxutil.RegisterNodeName(*nodesrv, "HarmoProvider", false)
@@ -223,23 +278,27 @@ func main() {
 	if err != nil {
 		log.Fatalf("Fail to Connect Synerex Server: %v", err)
 	}
-	ioserv = run_server()
+	ioserv = runServer()
 	fmt.Printf("Running HarmoVis Server..\n")
 	if ioserv == nil {
 		os.Exit(1)
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
+	go startProvidingRainFallData(ctx)
+	defer cancel()
+
 	client := api.NewSynerexClient(conn)
-	argJson := fmt.Sprintf("{Client:Map:RIDE}")
-	ride_client := sxutil.NewSMServiceClient(client, api.ChannelType_RIDE_SHARE, argJson)
+	argJSON := fmt.Sprintf("{Client:Map:RIDE}")
+	rideClinet := sxutil.NewSMServiceClient(client, api.ChannelType_RIDE_SHARE, argJSON)
 
-	argJson2 := fmt.Sprintf("{Client:Map:PT}")
-	pt_client := sxutil.NewSMServiceClient(client, api.ChannelType_PT_SERVICE, argJson2)
+	argJSON2 := fmt.Sprintf("{Client:Map:PT}")
+	ptClient := sxutil.NewSMServiceClient(client, api.ChannelType_PT_SERVICE, argJSON2)
 
 	wg.Add(1)
-	go subscribeRideSupply(ride_client)
+	go subscribeRideSupply(rideClinet)
 	wg.Add(1)
-	go subscribePTSupply(pt_client)
+	go subscribePTSupply(ptClient)
 
 	go monitorStatus() // keep status
 
